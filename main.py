@@ -291,16 +291,84 @@ def _search_json_for_name(data):
     return None
 
 
+def fetch_price_amazon(url: str):
+    """
+    يسحب اسم المنتج وسعره من صفحة منتج على أمازون.
+
+    ⚠️ ملاحظة مهمة: أمازون بيستخدم حماية قوية (زي DataDome/Akamai) وغالباً
+    أشد من نون. الطلب المباشر هنا ممكن يتحجب أسرع، خصوصاً مع الاستخدام
+    المتكرر. لو حصل حجب متكرر، برضو الحل الأعملي هو scraping API.
+    """
+    response = requests.get(url, headers=HEADERS, timeout=15)
+    logger.info(f"[amazon] status={response.status_code} len={len(response.text)}")
+    response.raise_for_status()
+    html = response.text
+    soup = BeautifulSoup(html, "html.parser")
+
+    # --- 1) العناصر القياسية في صفحة منتج أمازون ---
+    title_el = soup.select_one("#productTitle")
+    price_el = soup.select_one(".a-price .a-offscreen")
+    if title_el and price_el:
+        try:
+            name = title_el.get_text(strip=True)
+            price_text = price_el.get_text(strip=True)
+            price = float(re.sub(r"[^\d.]", "", price_text))
+            logger.info("[amazon] matched via CSS selectors")
+            return name, price
+        except ValueError:
+            pass
+
+    # --- 2) JSON-LD (لو موجودة) ---
+    for script in soup.find_all("script", type="application/ld+json"):
+        if not script.string:
+            continue
+        try:
+            data = json.loads(script.string)
+        except json.JSONDecodeError:
+            continue
+        for node in data if isinstance(data, list) else [data]:
+            if not isinstance(node, dict):
+                continue
+            if node.get("@type") == "Product":
+                name = node.get("name")
+                offers = node.get("offers")
+                price = None
+                if isinstance(offers, dict):
+                    price = offers.get("price") or offers.get("lowPrice")
+                elif isinstance(offers, list) and offers:
+                    price = offers[0].get("price")
+                if name and price is not None:
+                    logger.info("[amazon] matched via JSON-LD")
+                    return name, float(price)
+
+    # --- 3) Meta tags ---
+    price_meta = soup.find("meta", {"property": "product:price:amount"})
+    name_meta = soup.find("meta", {"property": "og:title"})
+    if price_meta and name_meta:
+        try:
+            logger.info("[amazon] matched via meta tags")
+            return name_meta["content"], float(price_meta["content"])
+        except (ValueError, KeyError):
+            pass
+
+    snippet = re.sub(r"\s+", " ", html[:300])
+    logger.info(f"[amazon] html_snippet={snippet}")
+    logger.warning(f"[amazon] all methods failed for url={url}")
+    raise ValueError("معرفتش أستخرج السعر من صفحة أمازون دي")
+
+
 def fetch_price(url: str):
     """
     نقطة الدخول الرئيسية: بتوجّه الطلب لدالة الموقع المناسبة حسب اسم
-    الدومين في اللينك. لسه بس نون مفعّلة، الباقي (جوميا/أمازون) TODO.
+    الدومين في اللينك. حالياً نون وأمازون مفعّلين، جوميا لسه TODO.
     """
     if "noon.com" in url:
         return fetch_price_noon(url)
+    if "amazon." in url:
+        return fetch_price_amazon(url)
 
     raise NotImplementedError(
-        "الموقع ده لسه مش مدعوم. حالياً بس نون (noon.com) شغالة."
+        "الموقع ده لسه مش مدعوم. حالياً نون وأمازون شغالين بس."
     )
 
 
