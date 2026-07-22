@@ -148,37 +148,79 @@ def fetch_price_noon(url: str):
     بعد استخدام كتير أو مكثف. لو حصل حجب متكرر، الحل الأعملي هو
     استخدام خدمة scraping API جاهزة (زي ScraperAPI أو ScrapingBee)
     بدل الطلب المباشر.
+
+    بيجرب 4 طرق بالترتيب (الأقوى للأضعف):
+    1. JSON-LD (بيانات Schema.org اللي المواقع بتحطها لمحركات البحث)
+    2. __NEXT_DATA__ (بيانات داخلية لو الموقع مبني بـ Next.js)
+    3. Meta tags (og:price, product:price:amount)
+    4. Regex مباشر على نص الصفحة الخام
     """
     response = requests.get(url, headers=HEADERS, timeout=15)
+    logger.info(f"[noon] status={response.status_code} len={len(response.text)}")
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
+    html = response.text
 
-    # نون موقع مبني بـ Next.js، وغالباً البيانات بتتخزن في
-    # <script id="__NEXT_DATA__"> كـ JSON. بنحاول نقرأها من هناك الأول
-    # لأنها أدق من محاولة قراءة الشكل المرئي للصفحة.
+    # تشخيص: نطبع أول 300 حرف من الصفحة عشان نتأكد هل رجعتلنا صفحة
+    # المنتج الحقيقية ولا صفحة تحقق أمني (Challenge/CAPTCHA) من نون
+    snippet = re.sub(r"\s+", " ", html[:300])
+    logger.info(f"[noon] html_snippet={snippet}")
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # --- 1) JSON-LD ---
+    for script in soup.find_all("script", type="application/ld+json"):
+        if not script.string:
+            continue
+        try:
+            data = json.loads(script.string)
+        except json.JSONDecodeError:
+            continue
+        for node in data if isinstance(data, list) else [data]:
+            if not isinstance(node, dict):
+                continue
+            if node.get("@type") == "Product":
+                name = node.get("name")
+                offers = node.get("offers")
+                price = None
+                if isinstance(offers, dict):
+                    price = offers.get("price") or offers.get("lowPrice")
+                elif isinstance(offers, list) and offers:
+                    price = offers[0].get("price")
+                if name and price is not None:
+                    logger.info("[noon] matched via JSON-LD")
+                    return name, float(price)
+
+    # --- 2) __NEXT_DATA__ ---
     next_data_tag = soup.find("script", id="__NEXT_DATA__")
     if next_data_tag and next_data_tag.string:
         try:
             data = json.loads(next_data_tag.string)
-            # المسار جوه الـ JSON ممكن يتغير مع تحديثات نون، فبندور
-            # عن أول مفتاح اسمه sellingPrice أو price جوه الشجرة كلها
             price = _search_json_for_price(data)
             name = _search_json_for_name(data)
             if price is not None and name is not None:
+                logger.info("[noon] matched via __NEXT_DATA__")
                 return name, price
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # لو فشلت طريقة الـ JSON، نجرب نلاقي السعر من الصفحة المرئية
-    # مباشرة (Fallback) عن طريق meta tags أو نصوص فيها رقم + "EGP"/"ج.م"
+    # --- 3) Meta tags ---
     price_meta = soup.find("meta", {"property": "product:price:amount"})
     name_meta = soup.find("meta", {"property": "og:title"})
     if price_meta and name_meta:
         try:
+            logger.info("[noon] matched via meta tags")
             return name_meta["content"], float(price_meta["content"])
         except (ValueError, KeyError):
             pass
 
+    # --- 4) Regex مباشر على النص الخام (آخر حل) ---
+    price_match = re.search(r'"sellingPrice"\s*:\s*([\d.]+)', html)
+    title_match = re.search(r'"title"\s*:\s*"([^"]{5,150})"', html)
+    if price_match and title_match:
+        logger.info("[noon] matched via regex fallback")
+        return title_match.group(1), float(price_match.group(1))
+
+    logger.warning(f"[noon] all methods failed for url={url}")
     raise ValueError("معرفتش أستخرج السعر من صفحة نون دي")
 
 
