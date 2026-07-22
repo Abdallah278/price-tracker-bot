@@ -16,9 +16,14 @@
 """
 
 import os
+import re
+import json
 import sqlite3
 import logging
 from datetime import datetime, timedelta
+
+import requests
+from bs4 import BeautifulSoup
 
 from telegram import (
     Update,
@@ -121,14 +126,111 @@ def user_item_count(telegram_id: int) -> int:
 
 
 # ------------------------------------------------------------------
-# دالة سحب السعر (لسه محتاجة تتفعّل)
+# دالة سحب السعر
 # ------------------------------------------------------------------
+
+# هيدرز بتقلد متصفح حقيقي، عشان نقلل احتمال الحجب المباشر
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ar,en;q=0.9",
+}
+
+
+def fetch_price_noon(url: str):
+    """
+    يسحب اسم المنتج وسعره من صفحة منتج على نون (noon.com).
+
+    ⚠️ ملاحظة مهمة: نون بيستخدم نظام حماية (Akamai) بيحاول يمنع
+    أدوات السكرابينج. الكود ده بيشتغل بمحاولة مباشرة، وممكن يتحجب
+    بعد استخدام كتير أو مكثف. لو حصل حجب متكرر، الحل الأعملي هو
+    استخدام خدمة scraping API جاهزة (زي ScraperAPI أو ScrapingBee)
+    بدل الطلب المباشر.
+    """
+    response = requests.get(url, headers=HEADERS, timeout=15)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    # نون موقع مبني بـ Next.js، وغالباً البيانات بتتخزن في
+    # <script id="__NEXT_DATA__"> كـ JSON. بنحاول نقرأها من هناك الأول
+    # لأنها أدق من محاولة قراءة الشكل المرئي للصفحة.
+    next_data_tag = soup.find("script", id="__NEXT_DATA__")
+    if next_data_tag and next_data_tag.string:
+        try:
+            data = json.loads(next_data_tag.string)
+            # المسار جوه الـ JSON ممكن يتغير مع تحديثات نون، فبندور
+            # عن أول مفتاح اسمه sellingPrice أو price جوه الشجرة كلها
+            price = _search_json_for_price(data)
+            name = _search_json_for_name(data)
+            if price is not None and name is not None:
+                return name, price
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # لو فشلت طريقة الـ JSON، نجرب نلاقي السعر من الصفحة المرئية
+    # مباشرة (Fallback) عن طريق meta tags أو نصوص فيها رقم + "EGP"/"ج.م"
+    price_meta = soup.find("meta", {"property": "product:price:amount"})
+    name_meta = soup.find("meta", {"property": "og:title"})
+    if price_meta and name_meta:
+        try:
+            return name_meta["content"], float(price_meta["content"])
+        except (ValueError, KeyError):
+            pass
+
+    raise ValueError("معرفتش أستخرج السعر من صفحة نون دي")
+
+
+def _search_json_for_price(data):
+    """بيدور جوه أي JSON متداخل عن حقل سعر معروف."""
+    price_keys = ("sellingPrice", "salePrice", "price")
+    if isinstance(data, dict):
+        for key in price_keys:
+            if key in data and isinstance(data[key], (int, float)):
+                return float(data[key])
+        for value in data.values():
+            result = _search_json_for_price(value)
+            if result is not None:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _search_json_for_price(item)
+            if result is not None:
+                return result
+    return None
+
+
+def _search_json_for_name(data):
+    """بيدور جوه أي JSON متداخل عن حقل اسم منتج معروف."""
+    name_keys = ("title", "name", "productTitle")
+    if isinstance(data, dict):
+        for key in name_keys:
+            if key in data and isinstance(data[key], str) and len(data[key]) > 3:
+                return data[key]
+        for value in data.values():
+            result = _search_json_for_name(value)
+            if result is not None:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _search_json_for_name(item)
+            if result is not None:
+                return result
+    return None
+
+
 def fetch_price(url: str):
     """
-    TODO: نفّذ منطق سحب السعر هنا حسب كل موقع.
-    ترجع (product_name: str, price: float) أو تعمل raise لو فشلت.
+    نقطة الدخول الرئيسية: بتوجّه الطلب لدالة الموقع المناسبة حسب اسم
+    الدومين في اللينك. لسه بس نون مفعّلة، الباقي (جوميا/أمازون) TODO.
     """
-    raise NotImplementedError("ضيف منطق سحب السعر الخاص بالموقع هنا")
+    if "noon.com" in url:
+        return fetch_price_noon(url)
+
+    raise NotImplementedError(
+        "الموقع ده لسه مش مدعوم. حالياً بس نون (noon.com) شغالة."
+    )
 
 
 # ------------------------------------------------------------------
