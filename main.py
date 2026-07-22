@@ -18,6 +18,8 @@
 import os
 import re
 import json
+import random
+import asyncio
 import sqlite3
 import logging
 from datetime import datetime, timedelta
@@ -59,6 +61,15 @@ PRO_TIER_LIMIT = 20
 PRO_PRICE_STARS = 150
 CHECK_INTERVAL_SECONDS = 900  # 15 دقيقة (كانت ساعة)
 
+# كل مرة نفحص فيها الأسعار، بنوزّع الطلبات على مدى عشوائي بين الرقمين
+# دول (بالثواني) بدل ما نبعتهم كلهم مرة واحدة، عشان نقلل احتمال الحجب
+SPREAD_MIN_SECONDS = 300   # 5 دقايق
+SPREAD_MAX_SECONDS = 600   # 10 دقايق
+
+# لو لينك معين فشل الفحص بيه العدد ده من المرات على التوالي، نعطّله
+# تلقائياً عشان منستهلكش طلبات على حاجة واضح إنها باظت أو اتحجبت
+MAX_FAIL_COUNT = 6
+
 # صاحب البوت: معفي تلقائي من حد المنتجات وميحتاجش يدفع نجوم
 OWNER_TELEGRAM_ID = 2057835002
 
@@ -88,9 +99,18 @@ def init_db():
             url TEXT,
             product_name TEXT,
             last_price REAL,
-            created_at TEXT
+            created_at TEXT,
+            fail_count INTEGER DEFAULT 0,
+            disabled INTEGER DEFAULT 0
         )
     """)
+    # Migration: لو الجدول كان موجود من قبل (على الـ Volume القديم) من
+    # غير الأعمدة الجديدة، نضيفها هنا بأمان (بنتجاهل الخطأ لو موجودة أصلاً)
+    for column_def in ("fail_count INTEGER DEFAULT 0", "disabled INTEGER DEFAULT 0"):
+        try:
+            conn.execute(f"ALTER TABLE tracked_items ADD COLUMN {column_def}")
+        except sqlite3.OperationalError:
+            pass  # العمود موجود بالفعل
     conn.commit()
     conn.close()
 
@@ -362,7 +382,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_items":
         conn = get_db()
         items = conn.execute(
-            "SELECT product_name, last_price, url FROM tracked_items WHERE user_id = ?",
+            "SELECT product_name, last_price, url, disabled FROM tracked_items WHERE user_id = ?",
             (telegram_id,),
         ).fetchall()
         conn.close()
@@ -372,7 +392,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "📦 *المنتجات اللي بتتابعها:*\n\n"
             for item in items:
-                text += f"• {item['product_name']} — 💰 {item['last_price']}\n{item['url']}\n\n"
+                status = "⏸️ (متوقف مؤقتاً)" if item["disabled"] else ""
+                text += f"• {item['product_name']} — 💰 {item['last_price']} {status}\n{item['url']}\n\n"
         await query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=back_to_menu_keyboard()
         )
@@ -450,7 +471,7 @@ async def my_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
     conn = get_db()
     items = conn.execute(
-        "SELECT product_name, last_price, url FROM tracked_items WHERE user_id = ?",
+        "SELECT product_name, last_price, url, disabled FROM tracked_items WHERE user_id = ?",
         (telegram_id,),
     ).fetchall()
     conn.close()
@@ -463,7 +484,8 @@ async def my_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "📦 *المنتجات اللي بتتابعها:*\n\n"
     for item in items:
-        text += f"• {item['product_name']} — 💰 {item['last_price']}\n{item['url']}\n\n"
+        status = "⏸️ (متوقف مؤقتاً)" if item["disabled"] else ""
+        text += f"• {item['product_name']} — 💰 {item['last_price']} {status}\n{item['url']}\n\n"
     await update.message.reply_text(
         text, parse_mode="Markdown", reply_markup=main_menu_keyboard()
     )
@@ -510,15 +532,66 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ------------------------------------------------------------------
 async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
-    items = conn.execute("SELECT * FROM tracked_items").fetchall()
+    items = conn.execute(
+        "SELECT * FROM tracked_items WHERE disabled = 0"
+    ).fetchall()
     conn.close()
 
-    changed_count = 0
-    for item in items:
+    if not items:
+        return 0
+
+    # نجمع اللينكات الفريدة بس، عشان لو أكتر من مستخدم بيتابع نفس
+    # اللينك بالظبط، نفحصه مرة واحدة بس ونستخدم النتيجة للكل
+    unique_urls = list({item["url"] for item in items})
+
+    # بنوزّع الطلبات على مدى عشوائي بين 5 و10 دقايق بدل ما نبعتهم
+    # كلهم مرة واحدة، عشان نقلل احتمال إن نون يحس إننا بوت
+    total_spread = random.uniform(SPREAD_MIN_SECONDS, SPREAD_MAX_SECONDS)
+    delay_per_url = total_spread / len(unique_urls) if len(unique_urls) > 1 else 0
+
+    price_cache = {}  # url -> (name, price) أو None لو فشل
+    for i, url in enumerate(unique_urls):
         try:
-            _, new_price = fetch_price(item["url"])
-        except Exception:
+            price_cache[url] = fetch_price(url)
+        except Exception as e:
+            logger.warning(f"[check_job] failed for {url}: {e}")
+            price_cache[url] = None
+        if i < len(unique_urls) - 1:
+            await asyncio.sleep(delay_per_url)
+
+    changed_count = 0
+    conn = get_db()
+    for item in items:
+        result = price_cache.get(item["url"])
+
+        if result is None:
+            # فشل الفحص: نزود عداد الفشل، ولو وصل للحد الأقصى نعطّل
+            # اللينك ده ونبلغ المستخدم مرة واحدة بس
+            new_fail_count = item["fail_count"] + 1
+            if new_fail_count >= MAX_FAIL_COUNT:
+                conn.execute(
+                    "UPDATE tracked_items SET fail_count = ?, disabled = 1 WHERE id = ?",
+                    (new_fail_count, item["id"]),
+                )
+                conn.commit()
+                await context.bot.send_message(
+                    chat_id=item["user_id"],
+                    text=(
+                        f"⚠️ *وقفنا متابعة المنتج ده مؤقتاً:*\n📦 {item['product_name']}\n\n"
+                        f"فشل الفحص {MAX_FAIL_COUNT} مرات على التوالي "
+                        "(غالباً الموقع بيحجب الطلبات أو الرابط اتغير)."
+                    ),
+                    parse_mode="Markdown",
+                )
+            else:
+                conn.execute(
+                    "UPDATE tracked_items SET fail_count = ? WHERE id = ?",
+                    (new_fail_count, item["id"]),
+                )
+                conn.commit()
             continue
+
+        _, new_price = result
 
         if new_price < item["last_price"]:
             changed_count += 1
@@ -531,13 +604,15 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
                 ),
                 parse_mode="Markdown",
             )
-            conn = get_db()
-            conn.execute(
-                "UPDATE tracked_items SET last_price = ? WHERE id = ?",
-                (new_price, item["id"]),
-            )
-            conn.commit()
-            conn.close()
+
+        # في كل الحالات (نزل أو لأ) بنصفّر عداد الفشل لأن الفحص نجح
+        conn.execute(
+            "UPDATE tracked_items SET last_price = ?, fail_count = 0 WHERE id = ?",
+            (new_price, item["id"]),
+        )
+        conn.commit()
+
+    conn.close()
     return changed_count
 
 
