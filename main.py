@@ -800,6 +800,25 @@ async def simulate_drop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def reactivate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🔧 أمر خاص بالمالك: يرجّع تشغيل أي منتجات اتوقفت تلقائياً بعد فشل
+    متكرر (فاكر MAX_FAIL_COUNT)، وبيصفّر عداد الفشل بتاعها."""
+    if update.effective_user.id != OWNER_TELEGRAM_ID:
+        return
+    conn = get_db()
+    conn.execute(
+        "UPDATE tracked_items SET disabled = 0, fail_count = 0 WHERE user_id = ?",
+        (OWNER_TELEGRAM_ID,),
+    )
+    count = conn.total_changes
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(
+        f"🔄 اترجع تشغيل كل منتجاتك ({count} منتج) وصفّرنا عداد الفشل.\n"
+        "استخدم /checknow عشان تختبرها تاني."
+    )
+
+
 # ------------------------------------------------------------------
 # قايمة الأوامر (بتظهر جنب حقل الكتابة في تليجرام)
 # ------------------------------------------------------------------
@@ -824,6 +843,7 @@ def main():
     app.add_handler(CommandHandler("upgrade", upgrade))
     app.add_handler(CommandHandler("checknow", checknow))
     app.add_handler(CommandHandler("simulate", simulate_drop))
+    app.add_handler(CommandHandler("reactivate", reactivate))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^(menu_|platform_)"))
     app.add_handler(PreCheckoutQueryHandler(precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
