@@ -1,26 +1,18 @@
 """
-بوت متابعة الأسعار - Telegram Price Tracker Bot
-=================================================
+بوت متابعة الأسعار - Telegram Price Tracker Bot (v2 - واجهة محسّنة)
+======================================================================
 
-الفكرة:
-- المستخدم يبعت لينك منتج (أمازون / نون / جوميا / أي موقع)
-- البوت يحفظ اللينك والسعر الحالي
-- Job دوري (كل ساعة مثلاً) يفحص السعر تاني ويبعت تنبيه لو نزل
-- المستخدم بيدفع اشتراك بنجوم تليجرام (Telegram Stars) عشان يقدر يتابع
-  عدد منتجات أكبر من الحد المجاني
+الجديد في النسخة دي:
+- قايمة أزرار تفاعلية (Inline Keyboard) بدل النصوص العادية
+- إيموجيز في كل الرسايل
+- قايمة أوامر (Menu) تظهر جنب حقل الكتابة في تليجرام
+- رسايل أوضح وأجمل شكل
 
 المتطلبات قبل التشغيل:
-1. pip install python-telegram-bot --upgrade
-2. اعمل بوت من BotFather على تليجرام وخد الـ Token
-3. حط الـ Token في المتغير BOT_TOKEN تحت (أو في متغير بيئة TELEGRAM_BOT_TOKEN)
-4. لسحب الأسعار الفعلي من المواقع، محتاج تضيف دالة scraping مناسبة
-   لكل موقع (موجودة أماكنها محددة بـ TODO تحت) لأن كل موقع بنية HTML
-   مختلفة، وبعض المواقع (زي أمازون) بيحتاج مكتبة زي requests + headers
-   مناسبة أو خدمة scraping API جاهزة عشان ميحصلش حجب للـ IP.
-
-هيكل قاعدة البيانات (SQLite بسيط عشان تبدأ بسرعة، تقدر تستبدلها بـ Postgres لاحقاً):
-- users: telegram_id, tier (free/pro), tier_expires_at
-- tracked_items: id, user_id, url, product_name, last_price, created_at
+1. pip install "python-telegram-bot[job-queue]" --upgrade
+2. اعمل بوت من BotFather وخد الـ Token
+3. حط الـ Token في متغير بيئة TELEGRAM_BOT_TOKEN
+4. فعّل دالة fetch_price() بمنطق سحب السعر الحقيقي (لسه TODO)
 """
 
 import os
@@ -28,11 +20,18 @@ import sqlite3
 import logging
 from datetime import datetime, timedelta
 
-from telegram import Update, LabeledPrice
+from telegram import (
+    Update,
+    LabeledPrice,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    BotCommand,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     PreCheckoutQueryHandler,
     ContextTypes,
     filters,
@@ -47,10 +46,10 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "ضع_التوكن_هنا")
 DB_PATH = "price_tracker.db"
 
-FREE_TIER_LIMIT = 2          # عدد المنتجات المسموح بيها مجاناً
-PRO_TIER_LIMIT = 20          # عدد المنتجات في الاشتراك المدفوع
-PRO_PRICE_STARS = 150        # سعر الاشتراك الشهري بالنجوم (XTR)
-CHECK_INTERVAL_SECONDS = 3600  # كل قد ايه يفحص الأسعار (ساعة هنا)
+FREE_TIER_LIMIT = 2
+PRO_TIER_LIMIT = 20
+PRO_PRICE_STARS = 150
+CHECK_INTERVAL_SECONDS = 3600
 
 
 # ------------------------------------------------------------------
@@ -122,26 +121,47 @@ def user_item_count(telegram_id: int) -> int:
 
 
 # ------------------------------------------------------------------
-# دالة سحب السعر (المكان اللي محتاج تخصصه لكل موقع)
+# دالة سحب السعر (لسه محتاجة تتفعّل)
 # ------------------------------------------------------------------
 def fetch_price(url: str):
     """
-    TODO: نفّذ منطق سحب السعر هنا.
-
-    اقتراحات عملية:
-    - لو هتعمل scraping مباشر: استخدم requests + BeautifulSoup،
-      وحدد الـ CSS selector بتاع السعر لكل موقع على حدة (أمازون
-      مختلف عن نون مختلف عن جوميا).
-    - أفضل من كده لتفادي الحجب: استخدم خدمة scraping API جاهزة
-      (ScraperAPI, ScrapingBee, Bright Data) بتتعامل مع الـ proxies
-      والـ CAPTCHA نيابة عنك.
-    - أمازون بالذات عنده Product Advertising API رسمي لو هتشتغل
-      بشكل تجاري كبير.
-
-    الدالة المفروض ترجع (product_name: str, price: float) أو None
-    لو فشلت.
+    TODO: نفّذ منطق سحب السعر هنا حسب كل موقع.
+    ترجع (product_name: str, price: float) أو تعمل raise لو فشلت.
     """
     raise NotImplementedError("ضيف منطق سحب السعر الخاص بالموقع هنا")
+
+
+# ------------------------------------------------------------------
+# القوايم التفاعلية (Inline Keyboards)
+# ------------------------------------------------------------------
+def main_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📦 منتجاتي", callback_data="menu_items")],
+        [InlineKeyboardButton("⭐ ترقية لخطة Pro", callback_data="menu_upgrade")],
+        [InlineKeyboardButton("ℹ️ إزاي أستخدم البوت", callback_data="menu_help")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def back_to_menu_keyboard():
+    keyboard = [[InlineKeyboardButton("⬅️ رجوع للقايمة الرئيسية", callback_data="menu_main")]]
+    return InlineKeyboardMarkup(keyboard)
+
+
+WELCOME_TEXT = (
+    "👋 *أهلاً بيك في بوت متابعة الأسعار!*\n\n"
+    "🔗 ابعتلي لينك أي منتج، وأنا هتابعلك سعره وأبعتلك تنبيه فوري 🔻 لما ينزل.\n\n"
+    "📊 اختار من القايمة تحت 👇"
+)
+
+HELP_TEXT = (
+    "ℹ️ *إزاي تستخدم البوت:*\n\n"
+    "1️⃣ ابعت لينك أي منتج من أي موقع تسوق\n"
+    "2️⃣ البوت هيحفظه ويراقب السعر تلقائي\n"
+    "3️⃣ هتوصلك رسالة 🔻 فوراً لما السعر ينزل\n\n"
+    f"🆓 الخطة المجانية: حتى {FREE_TIER_LIMIT} منتجات\n"
+    f"⭐ خطة Pro: حتى {PRO_TIER_LIMIT} منتج مقابل {PRO_PRICE_STARS} نجمة/شهر"
+)
 
 
 # ------------------------------------------------------------------
@@ -150,18 +170,67 @@ def fetch_price(url: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_or_create_user(update.effective_user.id)
     await update.message.reply_text(
-        "أهلاً بيك في بوت متابعة الأسعار!\n\n"
-        "ابعتلي لينك أي منتج وهتابعلك سعره، وأبعتلك تنبيه فوراً لما ينزل.\n\n"
-        f"الخطة المجانية: حتى {FREE_TIER_LIMIT} منتجات.\n"
-        f"للاشتراك في خطة Pro ({PRO_TIER_LIMIT} منتج) استخدم /upgrade"
+        WELCOME_TEXT,
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
     )
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يتعامل مع ضغطات أزرار القايمة."""
+    query = update.callback_query
+    await query.answer()
+    telegram_id = query.from_user.id
+
+    if query.data == "menu_main":
+        await query.edit_message_text(
+            WELCOME_TEXT, parse_mode="Markdown", reply_markup=main_menu_keyboard()
+        )
+
+    elif query.data == "menu_help":
+        await query.edit_message_text(
+            HELP_TEXT, parse_mode="Markdown", reply_markup=back_to_menu_keyboard()
+        )
+
+    elif query.data == "menu_items":
+        conn = get_db()
+        items = conn.execute(
+            "SELECT product_name, last_price, url FROM tracked_items WHERE user_id = ?",
+            (telegram_id,),
+        ).fetchall()
+        conn.close()
+
+        if not items:
+            text = "📭 مفيش منتجات بتتابعها دلوقتي.\n\n🔗 ابعتلي لينك منتج عشان تبدأ."
+        else:
+            text = "📦 *المنتجات اللي بتتابعها:*\n\n"
+            for item in items:
+                text += f"• {item['product_name']} — 💰 {item['last_price']}\n{item['url']}\n\n"
+        await query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=back_to_menu_keyboard()
+        )
+
+    elif query.data == "menu_upgrade":
+        prices = [LabeledPrice("اشتراك Pro لمدة شهر", PRO_PRICE_STARS)]
+        await context.bot.send_invoice(
+            chat_id=query.message.chat_id,
+            title="⭐ اشتراك Pro - متابعة الأسعار",
+            description=f"تابع حتى {PRO_TIER_LIMIT} منتج لمدة شهر كامل",
+            payload="pro_subscription_1_month",
+            provider_token="",
+            currency="XTR",
+            prices=prices,
+        )
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يستقبل أي رسالة فيها لينك ويبدأ يتابعه."""
     url = update.message.text.strip()
     if not url.startswith("http"):
-        await update.message.reply_text("ابعتلي لينك صحيح يبدأ بـ http أو https 🙂")
+        await update.message.reply_text(
+            "🔗 ابعتلي لينك صحيح يبدأ بـ http أو https 🙂",
+            reply_markup=main_menu_keyboard(),
+        )
         return
 
     telegram_id = update.effective_user.id
@@ -170,8 +239,9 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_item_count(telegram_id) >= limit:
         await update.message.reply_text(
-            f"وصلت للحد الأقصى ({limit} منتج) في خطتك الحالية.\n"
-            "استخدم /upgrade عشان تزود العدد."
+            f"⚠️ وصلت للحد الأقصى ({limit} منتج) في خطتك الحالية.\n"
+            "⭐ استخدم زرار الترقية عشان تزود العدد.",
+            reply_markup=main_menu_keyboard(),
         )
         return
 
@@ -179,13 +249,16 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         product_name, price = fetch_price(url)
     except NotImplementedError:
         await update.message.reply_text(
-            "⚠️ لسه دالة سحب السعر مش متفعّلة لهذا الموقع. "
-            "(ده مكان الكود اللي محتاج تضيفه بنفسك حسب كل موقع)"
+            "⚠️ لسه دالة سحب السعر مش متفعّلة لهذا الموقع.",
+            reply_markup=main_menu_keyboard(),
         )
         return
     except Exception as e:
         logger.error(f"fetch_price failed: {e}")
-        await update.message.reply_text("معرفتش أجيب سعر المنتج ده، جرب لينك تاني.")
+        await update.message.reply_text(
+            "❌ معرفتش أجيب سعر المنتج ده، جرب لينك تاني.",
+            reply_markup=main_menu_keyboard(),
+        )
         return
 
     conn = get_db()
@@ -198,12 +271,15 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     await update.message.reply_text(
-        f"✅ بدأت أتابع: {product_name}\nالسعر الحالي: {price}\n"
-        "هبعتلك تنبيه لو نزل."
+        f"✅ *بدأت أتابع:* {product_name}\n💰 السعر الحالي: {price}\n\n"
+        "🔔 هبعتلك تنبيه فوراً لو نزل.",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
     )
 
 
 async def my_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /items مباشرة (بديل للزرار)."""
     telegram_id = update.effective_user.id
     conn = get_db()
     items = conn.execute(
@@ -213,28 +289,29 @@ async def my_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not items:
-        await update.message.reply_text("مفيش منتجات بتتابعها دلوقتي.")
+        await update.message.reply_text(
+            "📭 مفيش منتجات بتتابعها دلوقتي.", reply_markup=main_menu_keyboard()
+        )
         return
 
-    text = "📦 المنتجات اللي بتتابعها:\n\n"
+    text = "📦 *المنتجات اللي بتتابعها:*\n\n"
     for item in items:
-        text += f"• {item['product_name']} — {item['last_price']}\n{item['url']}\n\n"
-    await update.message.reply_text(text)
+        text += f"• {item['product_name']} — 💰 {item['last_price']}\n{item['url']}\n\n"
+    await update.message.reply_text(
+        text, parse_mode="Markdown", reply_markup=main_menu_keyboard()
+    )
 
 
-# ------------------------------------------------------------------
-# الدفع بنجوم تليجرام (Telegram Stars)
-# ------------------------------------------------------------------
 async def upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يبعت فاتورة دفع بالنجوم للترقية لخطة Pro."""
+    """أمر /upgrade مباشرة (بديل للزرار)."""
     prices = [LabeledPrice("اشتراك Pro لمدة شهر", PRO_PRICE_STARS)]
     await context.bot.send_invoice(
         chat_id=update.effective_chat.id,
-        title="اشتراك Pro - متابعة الأسعار",
+        title="⭐ اشتراك Pro - متابعة الأسعار",
         description=f"تابع حتى {PRO_TIER_LIMIT} منتج لمدة شهر كامل",
         payload="pro_subscription_1_month",
-        provider_token="",  # نجوم تليجرام ماتحتاجش provider token
-        currency="XTR",     # XTR = عملة Telegram Stars
+        provider_token="",
+        currency="XTR",
         prices=prices,
     )
 
@@ -255,13 +332,14 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.commit()
     conn.close()
     await update.message.reply_text(
-        "🎉 تم تفعيل اشتراك Pro! تقدر دلوقتي تتابع حتى "
-        f"{PRO_TIER_LIMIT} منتج."
+        f"🎉 *تم تفعيل اشتراك Pro بنجاح!*\n\nتقدر دلوقتي تتابع حتى {PRO_TIER_LIMIT} منتج 🚀",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
     )
 
 
 # ------------------------------------------------------------------
-# فحص الأسعار الدوري (Job)
+# فحص الأسعار الدوري
 # ------------------------------------------------------------------
 async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
@@ -278,9 +356,11 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=item["user_id"],
                 text=(
-                    f"🔻 السعر نزل!\n{item['product_name']}\n"
-                    f"من {item['last_price']} إلى {new_price}\n{item['url']}"
+                    f"🔻 *السعر نزل!*\n\n"
+                    f"📦 {item['product_name']}\n"
+                    f"💰 من {item['last_price']} ➡️ {new_price}\n{item['url']}"
                 ),
+                parse_mode="Markdown",
             )
             conn = get_db()
             conn.execute(
@@ -292,19 +372,29 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ------------------------------------------------------------------
+# قايمة الأوامر (بتظهر جنب حقل الكتابة في تليجرام)
+# ------------------------------------------------------------------
+async def post_init(application: Application):
+    await application.bot.set_my_commands([
+        BotCommand("start", "🏠 القايمة الرئيسية"),
+        BotCommand("items", "📦 منتجاتي المتابعة"),
+        BotCommand("upgrade", "⭐ ترقية لخطة Pro"),
+    ])
+
+
+# ------------------------------------------------------------------
 # التشغيل
 # ------------------------------------------------------------------
 def main():
     init_db()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("items", my_items))
     app.add_handler(CommandHandler("upgrade", upgrade))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
     app.add_handler(PreCheckoutQueryHandler(precheckout))
-    app.add_handler(
-        MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment)
-    )
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track))
 
     app.job_queue.run_repeating(check_prices_job, interval=CHECK_INTERVAL_SECONDS)
