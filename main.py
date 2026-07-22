@@ -135,16 +135,30 @@ def fetch_price(url: str):
 # القوايم التفاعلية (Inline Keyboards)
 # ------------------------------------------------------------------
 def main_menu_keyboard():
+    # ملاحظة: "style" خاصية جديدة في Bot API 9.4 (فبراير 2026) بتلوّن الزرار
+    # فعلياً من جوه البوت (مش من ثيم تليجرام). المكتبة لسه ما بتدعمهاش رسمي
+    # في الكود، فبنبعتها يدوي عن طريق api_kwargs عشان تليجرام يفهمها.
+    # القيم المتاحة: "primary" (أزرق), "success" (أخضر), "danger" (أحمر)
     keyboard = [
-        [InlineKeyboardButton("📦 منتجاتي", callback_data="menu_items")],
-        [InlineKeyboardButton("⭐ ترقية لخطة Pro", callback_data="menu_upgrade")],
-        [InlineKeyboardButton("ℹ️ إزاي أستخدم البوت", callback_data="menu_help")],
+        [InlineKeyboardButton(
+            "📦 منتجاتي", callback_data="menu_items",
+            api_kwargs={"style": "primary"},
+        )],
+        [InlineKeyboardButton(
+            "⭐ ترقية لخطة Pro", callback_data="menu_upgrade",
+            api_kwargs={"style": "success"},
+        )],
+        [InlineKeyboardButton(
+            "ℹ️ إزاي أستخدم البوت", callback_data="menu_help",
+        )],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
 def back_to_menu_keyboard():
-    keyboard = [[InlineKeyboardButton("⬅️ رجوع للقايمة الرئيسية", callback_data="menu_main")]]
+    keyboard = [[InlineKeyboardButton(
+        "⬅️ رجوع للقايمة الرئيسية", callback_data="menu_main",
+    )]]
     return InlineKeyboardMarkup(keyboard)
 
 
