@@ -49,7 +49,10 @@ logger = logging.getLogger(__name__)
 # الإعدادات
 # ------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "ضع_التوكن_هنا")
-DB_PATH = "price_tracker.db"
+# لو عملت Volume على Railway بمسار /data، البيانات هتفضل محفوظة حتى
+# بعد أي رفع كود جديد. لو مفيش Volume، هيشتغل عادي بس البيانات هتتمسح
+# مع كل Redeploy زي ما كان بيحصل قبل كده.
+DB_PATH = "/data/price_tracker.db" if os.path.isdir("/data") else "price_tracker.db"
 
 FREE_TIER_LIMIT = 2
 PRO_TIER_LIMIT = 20
@@ -510,6 +513,7 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
     items = conn.execute("SELECT * FROM tracked_items").fetchall()
     conn.close()
 
+    changed_count = 0
     for item in items:
         try:
             _, new_price = fetch_price(item["url"])
@@ -517,6 +521,7 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         if new_price < item["last_price"]:
+            changed_count += 1
             await context.bot.send_message(
                 chat_id=item["user_id"],
                 text=(
@@ -533,6 +538,48 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
             )
             conn.commit()
             conn.close()
+    return changed_count
+
+
+# ------------------------------------------------------------------
+# أوامر اختبار (المالك بس)
+# ------------------------------------------------------------------
+async def checknow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🔧 أمر خاص بالمالك: يجبر البوت يفحص كل الأسعار فوراً بدل ما يستنى
+    الـ 15 دقيقة، عشان تقدر تختبر آلية التنبيهات بسرعة."""
+    if update.effective_user.id != OWNER_TELEGRAM_ID:
+        return
+    await update.message.reply_text("⏳ بفحص كل الأسعار دلوقتي...")
+    changed = await check_prices_job(context)
+    await update.message.reply_text(
+        f"✅ خلصت الفحص. عدد الأسعار اللي نزلت: {changed}"
+    )
+
+
+async def simulate_drop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🔧 أمر خاص بالمالك: يرفع السعر المحفوظ لمنتجاتك بنسبة 10% صناعياً،
+    عشان لما نعمل /checknow بعده، البوت يكتشف "نزول" وهمي في السعر
+    ويبعتلك التنبيه — كده تتأكد إن آلية التنبيهات شغالة من غير ما
+    تستنى السعر الحقيقي يتغير فعلاً."""
+    if update.effective_user.id != OWNER_TELEGRAM_ID:
+        return
+    conn = get_db()
+    items = conn.execute(
+        "SELECT id, last_price FROM tracked_items WHERE user_id = ?",
+        (OWNER_TELEGRAM_ID,),
+    ).fetchall()
+    for item in items:
+        fake_price = item["last_price"] * 1.10
+        conn.execute(
+            "UPDATE tracked_items SET last_price = ? WHERE id = ?",
+            (fake_price, item["id"]),
+        )
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(
+        f"🧪 اترفع السعر المحفوظ صناعياً لـ {len(items)} منتج.\n"
+        "دلوقتي استخدم /checknow عشان تشوف التنبيه الوهمي."
+    )
 
 
 # ------------------------------------------------------------------
@@ -551,11 +598,14 @@ async def post_init(application: Application):
 # ------------------------------------------------------------------
 def main():
     init_db()
+    logger.info(f"Database path: {DB_PATH} (persistent={'/data' in DB_PATH})")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("items", my_items))
     app.add_handler(CommandHandler("upgrade", upgrade))
+    app.add_handler(CommandHandler("checknow", checknow))
+    app.add_handler(CommandHandler("simulate", simulate_drop))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
     app.add_handler(PreCheckoutQueryHandler(precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
