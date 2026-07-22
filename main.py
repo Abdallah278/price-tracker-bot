@@ -669,7 +669,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ------------------------------------------------------------------
 # فحص الأسعار الدوري
 # ------------------------------------------------------------------
-async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
+async def check_prices_job(context: ContextTypes.DEFAULT_TYPE, spread: bool = True):
     conn = get_db()
     items = conn.execute(
         "SELECT * FROM tracked_items WHERE disabled = 0"
@@ -684,9 +684,13 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
     unique_urls = list({item["url"] for item in items})
 
     # بنوزّع الطلبات على مدى عشوائي بين 5 و10 دقايق بدل ما نبعتهم
-    # كلهم مرة واحدة، عشان نقلل احتمال إن نون يحس إننا بوت
-    total_spread = random.uniform(SPREAD_MIN_SECONDS, SPREAD_MAX_SECONDS)
-    delay_per_url = total_spread / len(unique_urls) if len(unique_urls) > 1 else 0
+    # كلهم مرة واحدة، عشان نقلل احتمال إن نون يحس إننا بوت.
+    # لو spread=False (زي أمر /checknow اليدوي)، بنفحص فوراً من غير تأخير.
+    if spread and len(unique_urls) > 1:
+        total_spread = random.uniform(SPREAD_MIN_SECONDS, SPREAD_MAX_SECONDS)
+        delay_per_url = total_spread / len(unique_urls)
+    else:
+        delay_per_url = 0
 
     price_cache = {}  # url -> (name, price) أو None لو فشل
     for i, url in enumerate(unique_urls):
@@ -695,7 +699,7 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"[check_job] failed for {url}: {e}")
             price_cache[url] = None
-        if i < len(unique_urls) - 1:
+        if i < len(unique_urls) - 1 and delay_per_url:
             await asyncio.sleep(delay_per_url)
 
     changed_count = 0
@@ -764,7 +768,7 @@ async def checknow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_TELEGRAM_ID:
         return
     await update.message.reply_text("⏳ بفحص كل الأسعار دلوقتي...")
-    changed = await check_prices_job(context)
+    changed = await check_prices_job(context, spread=False)
     await update.message.reply_text(
         f"✅ خلصت الفحص. عدد الأسعار اللي نزلت: {changed}"
     )
