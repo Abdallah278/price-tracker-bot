@@ -385,6 +385,10 @@ def main_menu_keyboard():
     # القيم المتاحة: "primary" (أزرق), "success" (أخضر), "danger" (أحمر)
     keyboard = [
         [InlineKeyboardButton(
+            "➕ ضيف منتج", callback_data="menu_add",
+            api_kwargs={"style": "success"},
+        )],
+        [InlineKeyboardButton(
             "📦 منتجاتي", callback_data="menu_items",
             api_kwargs={"style": "primary"},
         )],
@@ -394,6 +398,7 @@ def main_menu_keyboard():
         )],
         [InlineKeyboardButton(
             "ℹ️ إزاي أستخدم البوت", callback_data="menu_help",
+            api_kwargs={"style": "primary"},
         )],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -402,7 +407,30 @@ def main_menu_keyboard():
 def back_to_menu_keyboard():
     keyboard = [[InlineKeyboardButton(
         "⬅️ رجوع للقايمة الرئيسية", callback_data="menu_main",
+        api_kwargs={"style": "primary"},
     )]]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def platform_choice_keyboard():
+    """قايمة اختيار المنصة قبل إدخال اللينك."""
+    keyboard = [
+        [InlineKeyboardButton(
+            "🟠 أمازون", callback_data="platform_amazon",
+            api_kwargs={"style": "success"},
+        )],
+        [InlineKeyboardButton(
+            "🟡 نون", callback_data="platform_noon",
+            api_kwargs={"style": "primary"},
+        )],
+        [InlineKeyboardButton(
+            "🔀 الاتنين مع بعض", callback_data="platform_both",
+            api_kwargs={"style": "primary"},
+        )],
+        [InlineKeyboardButton(
+            "⬅️ رجوع", callback_data="menu_main",
+        )],
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -469,6 +497,28 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text, parse_mode="Markdown", reply_markup=back_to_menu_keyboard()
         )
 
+    elif query.data == "menu_add":
+        await query.edit_message_text(
+            "➕ *ضيف منتج جديد*\n\nاختار المنصة اللي عايز تتابع منتج منها:",
+            parse_mode="Markdown",
+            reply_markup=platform_choice_keyboard(),
+        )
+
+    elif query.data in ("platform_amazon", "platform_noon", "platform_both"):
+        platform_names = {
+            "platform_amazon": "أمازون",
+            "platform_noon": "نون",
+            "platform_both": "أمازون أو نون",
+        }
+        # بنسجل اختيار المستخدم مؤقتاً عشان نتأكد إن اللينك اللي هيبعته
+        # فعلاً بتاع المنصة اللي اختارها
+        context.user_data["awaiting_platform"] = query.data.replace("platform_", "")
+        await query.edit_message_text(
+            f"🔗 تمام، دلوقتي ابعتلي لينك المنتج من *{platform_names[query.data]}*.",
+            parse_mode="Markdown",
+            reply_markup=back_to_menu_keyboard(),
+        )
+
     elif query.data == "menu_upgrade":
         prices = [LabeledPrice("اشتراك Pro لمدة شهر", PRO_PRICE_STARS)]
         await context.bot.send_invoice(
@@ -488,6 +538,24 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not url.startswith("http"):
         await update.message.reply_text(
             "🔗 ابعتلي لينك صحيح يبدأ بـ http أو https 🙂",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    # لو المستخدم كان اختار منصة معينة قبل كده (من زرار "ضيف منتج")،
+    # نتأكد إن اللينك اللي بعته فعلاً بتاع نفس المنصة
+    awaiting = context.user_data.pop("awaiting_platform", None)
+    is_amazon_link = any(d in url for d in ("amazon.", "amzn.", "a.co/"))
+    is_noon_link = "noon.com" in url
+    if awaiting == "amazon" and not is_amazon_link:
+        await update.message.reply_text(
+            "⚠️ اللينك ده مش من أمازون. ابعت لينك أمازون صحيح 🙂",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+    if awaiting == "noon" and not is_noon_link:
+        await update.message.reply_text(
+            "⚠️ اللينك ده مش من نون. ابعت لينك نون صحيح 🙂",
             reply_markup=main_menu_keyboard(),
         )
         return
@@ -752,7 +820,7 @@ def main():
     app.add_handler(CommandHandler("upgrade", upgrade))
     app.add_handler(CommandHandler("checknow", checknow))
     app.add_handler(CommandHandler("simulate", simulate_drop))
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^(menu_|platform_)"))
     app.add_handler(PreCheckoutQueryHandler(precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track))
