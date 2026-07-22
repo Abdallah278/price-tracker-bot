@@ -361,10 +361,13 @@ def fetch_price(url: str):
     """
     نقطة الدخول الرئيسية: بتوجّه الطلب لدالة الموقع المناسبة حسب اسم
     الدومين في اللينك. حالياً نون وأمازون مفعّلين، جوميا لسه TODO.
+
+    ملاحظة: أمازون بيستخدم كذا دومين مختصر (amzn.eu, amzn.to, a.co)
+    غير amazon.com الأساسي، فبندور على أي واحد فيهم.
     """
     if "noon.com" in url:
         return fetch_price_noon(url)
-    if "amazon." in url:
+    if any(domain in url for domain in ("amazon.", "amzn.", "a.co/")):
         return fetch_price_amazon(url)
 
     raise NotImplementedError(
