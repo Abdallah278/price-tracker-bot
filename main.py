@@ -54,7 +54,10 @@ DB_PATH = "price_tracker.db"
 FREE_TIER_LIMIT = 2
 PRO_TIER_LIMIT = 20
 PRO_PRICE_STARS = 150
-CHECK_INTERVAL_SECONDS = 3600
+CHECK_INTERVAL_SECONDS = 900  # 15 دقيقة (كانت ساعة)
+
+# صاحب البوت: معفي تلقائي من حد المنتجات وميحتاجش يدفع نجوم
+OWNER_TELEGRAM_ID = 2057835002
 
 
 # ------------------------------------------------------------------
@@ -108,6 +111,9 @@ def get_or_create_user(telegram_id: int):
 
 
 def is_pro(user_row) -> bool:
+    # المالك دايماً معامل كـ Pro، من غير ما يحتاج يدفع أو يشترك
+    if user_row["telegram_id"] == OWNER_TELEGRAM_ID:
+        return True
     if user_row["tier"] != "pro":
         return False
     if not user_row["tier_expires_at"]:
