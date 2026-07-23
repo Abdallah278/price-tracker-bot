@@ -158,6 +158,19 @@ def user_item_count(telegram_id: int) -> int:
 from scrapling.fetchers import StealthyFetcher
 
 
+def _get_page_html_text(page) -> str:
+    """
+    بيرجع محتوى الصفحة كـ نص عادي (str) دايماً، بغض النظر لو Scrapling
+    رجعه كـ bytes أو str، عشان نقدر نستخدم عليه regex بأمان.
+    """
+    body = getattr(page, "body", None)
+    if body is None:
+        return str(page)
+    if isinstance(body, bytes):
+        return body.decode("utf-8", errors="ignore")
+    return str(body)
+
+
 def _extract_price_generic(page):
     """
     محاولة عامة لاستخراج الاسم والسعر من أي صفحة، عن طريق:
@@ -195,7 +208,7 @@ def _extract_price_generic(page):
             pass
 
     # --- 3) Regex احتياطي على الـ HTML الخام ---
-    html = page.body if hasattr(page, "body") else str(page)
+    html = _get_page_html_text(page)
     price_match = re.search(r'"sellingPrice"\s*:\s*([\d.]+)', html)
     title_match = re.search(r'"title"\s*:\s*"([^"]{5,150})"', html)
     if price_match and title_match:
@@ -217,7 +230,7 @@ async def fetch_price_noon(url: str):
     if name is not None and price is not None:
         return name, price
 
-    snippet = re.sub(r"\s+", " ", (page.body if hasattr(page, "body") else str(page))[:300])
+    snippet = re.sub(r"\s+", " ", _get_page_html_text(page)[:300])
     logger.info(f"[noon] html_snippet={snippet}")
     logger.warning(f"[noon] all methods failed for url={url}")
     raise ValueError("معرفتش أستخرج السعر من صفحة نون دي")
@@ -250,7 +263,7 @@ async def fetch_price_amazon(url: str):
         logger.info("[amazon] matched via generic fallback")
         return name, price
 
-    snippet = re.sub(r"\s+", " ", (page.body if hasattr(page, "body") else str(page))[:300])
+    snippet = re.sub(r"\s+", " ", _get_page_html_text(page)[:300])
     logger.info(f"[amazon] html_snippet={snippet}")
     logger.warning(f"[amazon] all methods failed for url={url}")
     raise ValueError("معرفتش أستخرج السعر من صفحة أمازون دي")
