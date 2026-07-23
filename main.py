@@ -223,7 +223,19 @@ async def fetch_price_noon(url: str):
     (Scrapling StealthyFetcher) بدل الطلب النصي المباشر، عشان نتفادى
     حماية الموقع بشكل أقوى.
     """
-    page = await StealthyFetcher.async_fetch(url, headless=True, network_idle=True)
+    # نجرب خيارات إخفاء إضافية لنون تحديداً (حماية أقوى من أمازون):
+    # real_chrome=True بيستخدم متصفح Chrome حقيقي بدل النسخة المدمجة،
+    # وwait بيدي وقت إضافي للصفحة تخلص تحميلها بالكامل قبل ما نقراها
+    try:
+        page = await StealthyFetcher.async_fetch(
+            url, headless=True, network_idle=True,
+            real_chrome=True, wait=3000,
+        )
+    except Exception as e:
+        logger.warning(f"[noon] real_chrome failed ({e}), falling back to default browser")
+        page = await StealthyFetcher.async_fetch(
+            url, headless=True, network_idle=True, wait=3000,
+        )
     logger.info(f"[noon] status={page.status} len={len(page.body) if hasattr(page, 'body') else '?'}")
 
     name, price = _extract_price_generic(page)
