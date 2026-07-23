@@ -204,13 +204,13 @@ def _extract_price_generic(page):
     return None, None
 
 
-def fetch_price_noon(url: str):
+async def fetch_price_noon(url: str):
     """
     يسحب اسم المنتج وسعره من صفحة منتج على نون، باستخدام متصفح حقيقي
     (Scrapling StealthyFetcher) بدل الطلب النصي المباشر، عشان نتفادى
     حماية الموقع بشكل أقوى.
     """
-    page = StealthyFetcher.fetch(url, headless=True, network_idle=True)
+    page = await StealthyFetcher.async_fetch(url, headless=True, network_idle=True)
     logger.info(f"[noon] status={page.status} len={len(page.body) if hasattr(page, 'body') else '?'}")
 
     name, price = _extract_price_generic(page)
@@ -223,13 +223,13 @@ def fetch_price_noon(url: str):
     raise ValueError("معرفتش أستخرج السعر من صفحة نون دي")
 
 
-def fetch_price_amazon(url: str):
+async def fetch_price_amazon(url: str):
     """
     يسحب اسم المنتج وسعره من صفحة منتج على أمازون، باستخدام متصفح حقيقي
     (Scrapling StealthyFetcher). بيجرب أول العناصر القياسية بتاعة أمازون
     (أدق طريقة)، وبعدين الطرق العامة (JSON-LD, meta tags, regex).
     """
-    page = StealthyFetcher.fetch(url, headless=True, network_idle=True)
+    page = await StealthyFetcher.async_fetch(url, headless=True, network_idle=True)
     logger.info(f"[amazon] status={page.status} len={len(page.body) if hasattr(page, 'body') else '?'}")
 
     # --- العناصر القياسية في صفحة منتج أمازون (أدق طريقة) ---
@@ -256,7 +256,7 @@ def fetch_price_amazon(url: str):
     raise ValueError("معرفتش أستخرج السعر من صفحة أمازون دي")
 
 
-def fetch_price(url: str):
+async def fetch_price(url: str):
     """
     نقطة الدخول الرئيسية: بتوجّه الطلب لدالة الموقع المناسبة حسب اسم
     الدومين في اللينك. حالياً نون وأمازون مفعّلين، جوميا لسه TODO.
@@ -265,9 +265,9 @@ def fetch_price(url: str):
     غير amazon.com الأساسي، فبندور على أي واحد فيهم.
     """
     if "noon.com" in url:
-        return fetch_price_noon(url)
+        return await fetch_price_noon(url)
     if any(domain in url for domain in ("amazon.", "amzn.", "a.co/")):
-        return fetch_price_amazon(url)
+        return await fetch_price_amazon(url)
 
     raise NotImplementedError(
         "الموقع ده لسه مش مدعوم. حالياً نون وأمازون شغالين بس."
@@ -473,7 +473,7 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        product_name, price = fetch_price(url)
+        product_name, price = await fetch_price(url)
     except NotImplementedError:
         await update.message.reply_text(
             "⚠️ لسه دالة سحب السعر مش متفعّلة لهذا الموقع.",
@@ -595,7 +595,7 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE, spread: bool = Tr
     price_cache = {}  # url -> (name, price) أو None لو فشل
     for i, url in enumerate(unique_urls):
         try:
-            price_cache[url] = fetch_price(url)
+            price_cache[url] = await fetch_price(url)
         except Exception as e:
             logger.warning(f"[check_job] failed for {url}: {e}")
             price_cache[url] = None
