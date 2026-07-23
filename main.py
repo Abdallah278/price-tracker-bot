@@ -22,10 +22,8 @@ import random
 import asyncio
 import sqlite3
 import logging
+import subprocess
 from datetime import datetime, timedelta
-
-import requests
-from bs4 import BeautifulSoup
 
 from telegram import (
     Update,
@@ -155,53 +153,22 @@ def user_item_count(telegram_id: int) -> int:
 
 
 # ------------------------------------------------------------------
-# دالة سحب السعر
+# دالة سحب السعر (باستخدام Scrapling - متصفح حقيقي بتقنيات إخفاء)
 # ------------------------------------------------------------------
-
-# هيدرز بتقلد متصفح حقيقي، عشان نقلل احتمال الحجب المباشر
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ar,en;q=0.9",
-}
+from scrapling.fetchers import StealthyFetcher
 
 
-def fetch_price_noon(url: str):
+def _extract_price_generic(page):
     """
-    يسحب اسم المنتج وسعره من صفحة منتج على نون (noon.com).
-
-    ⚠️ ملاحظة مهمة: نون بيستخدم نظام حماية (Akamai) بيحاول يمنع
-    أدوات السكرابينج. الكود ده بيشتغل بمحاولة مباشرة، وممكن يتحجب
-    بعد استخدام كتير أو مكثف. لو حصل حجب متكرر، الحل الأعملي هو
-    استخدام خدمة scraping API جاهزة (زي ScraperAPI أو ScrapingBee)
-    بدل الطلب المباشر.
-
-    بيجرب 4 طرق بالترتيب (الأقوى للأضعف):
-    1. JSON-LD (بيانات Schema.org اللي المواقع بتحطها لمحركات البحث)
-    2. __NEXT_DATA__ (بيانات داخلية لو الموقع مبني بـ Next.js)
-    3. Meta tags (og:price, product:price:amount)
-    4. Regex مباشر على نص الصفحة الخام
+    محاولة عامة لاستخراج الاسم والسعر من أي صفحة، عن طريق:
+    1. JSON-LD (بيانات Schema.org)
+    2. Meta tags (og:title, product:price:amount)
+    3. Regex احتياطي على الـ HTML الخام
     """
-    response = requests.get(url, headers=HEADERS, timeout=15)
-    logger.info(f"[noon] status={response.status_code} len={len(response.text)}")
-    response.raise_for_status()
-    html = response.text
-
-    # تشخيص: نطبع أول 300 حرف من الصفحة عشان نتأكد هل رجعتلنا صفحة
-    # المنتج الحقيقية ولا صفحة تحقق أمني (Challenge/CAPTCHA) من نون
-    snippet = re.sub(r"\s+", " ", html[:300])
-    logger.info(f"[noon] html_snippet={snippet}")
-
-    soup = BeautifulSoup(html, "html.parser")
-
     # --- 1) JSON-LD ---
-    for script in soup.find_all("script", type="application/ld+json"):
-        if not script.string:
-            continue
+    for script_text in page.css("script[type='application/ld+json']::text").getall():
         try:
-            data = json.loads(script.string)
+            data = json.loads(script_text)
         except json.JSONDecodeError:
             continue
         for node in data if isinstance(data, list) else [data]:
@@ -216,142 +183,74 @@ def fetch_price_noon(url: str):
                 elif isinstance(offers, list) and offers:
                     price = offers[0].get("price")
                 if name and price is not None:
-                    logger.info("[noon] matched via JSON-LD")
                     return name, float(price)
 
-    # --- 2) __NEXT_DATA__ ---
-    next_data_tag = soup.find("script", id="__NEXT_DATA__")
-    if next_data_tag and next_data_tag.string:
+    # --- 2) Meta tags ---
+    price_content = page.css("meta[property='product:price:amount']::attr(content)").get()
+    name_content = page.css("meta[property='og:title']::attr(content)").get()
+    if price_content and name_content:
         try:
-            data = json.loads(next_data_tag.string)
-            price = _search_json_for_price(data)
-            name = _search_json_for_name(data)
-            if price is not None and name is not None:
-                logger.info("[noon] matched via __NEXT_DATA__")
-                return name, price
-        except (json.JSONDecodeError, KeyError):
+            return name_content, float(price_content)
+        except ValueError:
             pass
 
-    # --- 3) Meta tags ---
-    price_meta = soup.find("meta", {"property": "product:price:amount"})
-    name_meta = soup.find("meta", {"property": "og:title"})
-    if price_meta and name_meta:
-        try:
-            logger.info("[noon] matched via meta tags")
-            return name_meta["content"], float(price_meta["content"])
-        except (ValueError, KeyError):
-            pass
-
-    # --- 4) Regex مباشر على النص الخام (آخر حل) ---
+    # --- 3) Regex احتياطي على الـ HTML الخام ---
+    html = page.body if hasattr(page, "body") else str(page)
     price_match = re.search(r'"sellingPrice"\s*:\s*([\d.]+)', html)
     title_match = re.search(r'"title"\s*:\s*"([^"]{5,150})"', html)
     if price_match and title_match:
-        logger.info("[noon] matched via regex fallback")
         return title_match.group(1), float(price_match.group(1))
 
+    return None, None
+
+
+def fetch_price_noon(url: str):
+    """
+    يسحب اسم المنتج وسعره من صفحة منتج على نون، باستخدام متصفح حقيقي
+    (Scrapling StealthyFetcher) بدل الطلب النصي المباشر، عشان نتفادى
+    حماية الموقع بشكل أقوى.
+    """
+    page = StealthyFetcher.fetch(url, headless=True, network_idle=True)
+    logger.info(f"[noon] status={page.status} len={len(page.body) if hasattr(page, 'body') else '?'}")
+
+    name, price = _extract_price_generic(page)
+    if name is not None and price is not None:
+        return name, price
+
+    snippet = re.sub(r"\s+", " ", (page.body if hasattr(page, "body") else str(page))[:300])
+    logger.info(f"[noon] html_snippet={snippet}")
     logger.warning(f"[noon] all methods failed for url={url}")
     raise ValueError("معرفتش أستخرج السعر من صفحة نون دي")
 
 
-def _search_json_for_price(data):
-    """بيدور جوه أي JSON متداخل عن حقل سعر معروف."""
-    price_keys = ("sellingPrice", "salePrice", "price")
-    if isinstance(data, dict):
-        for key in price_keys:
-            if key in data and isinstance(data[key], (int, float)):
-                return float(data[key])
-        for value in data.values():
-            result = _search_json_for_price(value)
-            if result is not None:
-                return result
-    elif isinstance(data, list):
-        for item in data:
-            result = _search_json_for_price(item)
-            if result is not None:
-                return result
-    return None
-
-
-def _search_json_for_name(data):
-    """بيدور جوه أي JSON متداخل عن حقل اسم منتج معروف."""
-    name_keys = ("title", "name", "productTitle")
-    if isinstance(data, dict):
-        for key in name_keys:
-            if key in data and isinstance(data[key], str) and len(data[key]) > 3:
-                return data[key]
-        for value in data.values():
-            result = _search_json_for_name(value)
-            if result is not None:
-                return result
-    elif isinstance(data, list):
-        for item in data:
-            result = _search_json_for_name(item)
-            if result is not None:
-                return result
-    return None
-
-
 def fetch_price_amazon(url: str):
     """
-    يسحب اسم المنتج وسعره من صفحة منتج على أمازون.
-
-    ⚠️ ملاحظة مهمة: أمازون بيستخدم حماية قوية (زي DataDome/Akamai) وغالباً
-    أشد من نون. الطلب المباشر هنا ممكن يتحجب أسرع، خصوصاً مع الاستخدام
-    المتكرر. لو حصل حجب متكرر، برضو الحل الأعملي هو scraping API.
+    يسحب اسم المنتج وسعره من صفحة منتج على أمازون، باستخدام متصفح حقيقي
+    (Scrapling StealthyFetcher). بيجرب أول العناصر القياسية بتاعة أمازون
+    (أدق طريقة)، وبعدين الطرق العامة (JSON-LD, meta tags, regex).
     """
-    response = requests.get(url, headers=HEADERS, timeout=15)
-    logger.info(f"[amazon] status={response.status_code} len={len(response.text)}")
-    response.raise_for_status()
-    html = response.text
-    soup = BeautifulSoup(html, "html.parser")
+    page = StealthyFetcher.fetch(url, headless=True, network_idle=True)
+    logger.info(f"[amazon] status={page.status} len={len(page.body) if hasattr(page, 'body') else '?'}")
 
-    # --- 1) العناصر القياسية في صفحة منتج أمازون ---
-    title_el = soup.select_one("#productTitle")
-    price_el = soup.select_one(".a-price .a-offscreen")
+    # --- العناصر القياسية في صفحة منتج أمازون (أدق طريقة) ---
+    title_el = page.css("#productTitle::text").get()
+    price_el = page.css(".a-price .a-offscreen::text").get()
     if title_el and price_el:
         try:
-            name = title_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True)
-            price = float(re.sub(r"[^\d.]", "", price_text))
+            name = title_el.strip()
+            price = float(re.sub(r"[^\d.]", "", price_el))
             logger.info("[amazon] matched via CSS selectors")
             return name, price
         except ValueError:
             pass
 
-    # --- 2) JSON-LD (لو موجودة) ---
-    for script in soup.find_all("script", type="application/ld+json"):
-        if not script.string:
-            continue
-        try:
-            data = json.loads(script.string)
-        except json.JSONDecodeError:
-            continue
-        for node in data if isinstance(data, list) else [data]:
-            if not isinstance(node, dict):
-                continue
-            if node.get("@type") == "Product":
-                name = node.get("name")
-                offers = node.get("offers")
-                price = None
-                if isinstance(offers, dict):
-                    price = offers.get("price") or offers.get("lowPrice")
-                elif isinstance(offers, list) and offers:
-                    price = offers[0].get("price")
-                if name and price is not None:
-                    logger.info("[amazon] matched via JSON-LD")
-                    return name, float(price)
+    # --- الطرق العامة الاحتياطية ---
+    name, price = _extract_price_generic(page)
+    if name is not None and price is not None:
+        logger.info("[amazon] matched via generic fallback")
+        return name, price
 
-    # --- 3) Meta tags ---
-    price_meta = soup.find("meta", {"property": "product:price:amount"})
-    name_meta = soup.find("meta", {"property": "og:title"})
-    if price_meta and name_meta:
-        try:
-            logger.info("[amazon] matched via meta tags")
-            return name_meta["content"], float(price_meta["content"])
-        except (ValueError, KeyError):
-            pass
-
-    snippet = re.sub(r"\s+", " ", html[:300])
+    snippet = re.sub(r"\s+", " ", (page.body if hasattr(page, "body") else str(page))[:300])
     logger.info(f"[amazon] html_snippet={snippet}")
     logger.warning(f"[amazon] all methods failed for url={url}")
     raise ValueError("معرفتش أستخرج السعر من صفحة أمازون دي")
@@ -375,6 +274,7 @@ def fetch_price(url: str):
     )
 
 
+# ------------------------------------------------------------------
 # ------------------------------------------------------------------
 # القوايم التفاعلية (Inline Keyboards)
 # ------------------------------------------------------------------
@@ -833,9 +733,29 @@ async def post_init(application: Application):
 # ------------------------------------------------------------------
 # التشغيل
 # ------------------------------------------------------------------
+def ensure_scrapling_browser_installed():
+    """
+    Scrapling محتاج متصفح Chromium فعلي عشان يشتغل. بنتأكد إنه متثبت
+    مرة واحدة بس عند أول تشغيل (بعد كده هيفضل موجود على نفس الـ container
+    طول ما هو شغال، بس ممكن يتمسح لو Railway عمل rebuild كامل).
+    """
+    try:
+        logger.info("Checking/installing Scrapling browser (may take a while on first run)...")
+        result = subprocess.run(
+            ["scrapling", "install"],
+            capture_output=True, text=True, timeout=300,
+        )
+        logger.info(f"scrapling install exit_code={result.returncode}")
+        if result.returncode != 0:
+            logger.warning(f"scrapling install stderr: {result.stderr[:500]}")
+    except Exception as e:
+        logger.error(f"Failed to run scrapling install: {e}")
+
+
 def main():
     init_db()
     logger.info(f"Database path: {DB_PATH} (persistent={'/data' in DB_PATH})")
+    ensure_scrapling_browser_installed()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -848,6 +768,7 @@ def main():
     app.add_handler(PreCheckoutQueryHandler(precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track))
+
 
     app.job_queue.run_repeating(check_prices_job, interval=CHECK_INTERVAL_SECONDS)
 
